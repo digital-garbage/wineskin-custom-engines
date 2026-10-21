@@ -1,0 +1,335 @@
+diff --git a/dlls/winemac.drv/cocoa_window.m b/dlls/winemac.drv/cocoa_window.m
+index 7d6d704..14d510f 100644
+--- a/dlls/winemac.drv/cocoa_window.m
++++ b/dlls/winemac.drv/cocoa_window.m
+@@ -33,6 +33,17 @@
+ #import "cocoa_event.h"
+ #import "cocoa_opengl.h"
+ 
++/* Private Apple APIs for showing a layer of one process in the window of another (same ones Chrome uses) */
++@interface CAContext : NSObject
+++ (instancetype)contextWithCGSConnection:(uint32_t)cid options:(NSDictionary *)options;
++- (void)setLayer:(CALayer *)layer;
++- (uint32_t)contextId;
++@end
++@interface CALayerHost : CALayer
++@property uint32_t contextId;
++@end
++extern uint32_t CGSMainConnectionID(void);
++
+ #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+ 
+ 
+@@ -374,6 +385,7 @@ @interface WineContentView : WineBaseView <NSTextInputClient, NSViewLayerContent
+     int backingSize[2];
+ 
+     WineMetalView *_metalView;
++    NSMutableDictionary *_caLayerHosts;
+ }
+ 
+ @property (readonly, nonatomic) BOOL everHadGLContext;
+@@ -386,6 +398,8 @@ - (void) wine_getBackingSize:(int*)outBackingSize;
+     - (void) wine_setBackingSize:(const int*)newBackingSize;
+ 
+     - (WineMetalView*) newMetalViewWithDevice:(id<MTLDevice>)device;
++    - (void) syncCALayerHostWithContextId:(uint32_t)contextId frame:(CGRect)frame;
++    - (void) removeCALayerHostView:(uint32_t)contextId;
+ 
+ @end
+ 
+@@ -699,6 +713,31 @@ - (WineMetalView*) newMetalViewWithDevice:(id<MTLDevice>)device
+         return _metalView;
+     }
+ 
++    - (void) syncCALayerHostWithContextId:(uint32_t)contextId frame:(CGRect)frame
++    {
++        if (!_caLayerHosts) _caLayerHosts = [[NSMutableDictionary alloc] init];
++        CALayerHost *host = _caLayerHosts[@(contextId)];
++        if (!host)
++        {
++            host = [CALayerHost layer];
++            host.contextId = contextId;
++            [[self layer] addSublayer:host];
++            _caLayerHosts[@(contextId)] = host;
++        }
++        host.magnificationFilter = kCAFilterNearest;
++        host.contentsScale = retina_on ? 2.0 : 1.0;
++        host.frame = frame;
++        [(WineWindow*)self.window windowDidDrawContent];
++    }
++
++    - (void) removeCALayerHostView:(uint32_t)contextId
++    {
++        CALayerHost *host = _caLayerHosts[@(contextId)];
++        if (!host) return;
++        [host removeFromSuperlayer];
++        [_caLayerHosts removeObjectForKey:@(contextId)];
++    }
++
+     - (void) setLayerRetinaProperties:(BOOL)mode
+     {
+         [self layer].contentsScale = mode ? 2.0 : 1.0;
+@@ -3963,6 +4002,77 @@ macdrv_metal_layer macdrv_view_get_metal_layer(macdrv_metal_view v)
+     return (macdrv_metal_layer)layer;
+ }
+ 
++/* Producer side: a Metal layer that is not in any window of this process but published as a CAContext */
++@interface WineRemoteLayer : NSObject
++{
++@public
++    CAMetalLayer *layer;
++    CAContext *context;
++    uint32_t contextId;
++}
++@end
++@implementation WineRemoteLayer
++@end
++
++macdrv_remote_layer macdrv_create_remote_layer(CGRect bounds, macdrv_metal_layer *out_layer, uint32_t *out_context_id)
++{
++    __block WineRemoteLayer *remote = nil;
++    OnMainThread(^{
++        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
++        if (!device) return;
++        WineRemoteLayer *r = [[WineRemoteLayer alloc] init];
++        r->layer = [[CAMetalLayer alloc] init];
++        r->layer.device = device;
++        r->layer.framebufferOnly = YES;
++        r->layer.magnificationFilter = kCAFilterNearest;
++        r->layer.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
++        r->layer.contentsScale = retina_on ? 2.0 : 1.0;
++        r->layer.bounds = CGRectMake(0, 0, bounds.size.width, bounds.size.height);
++        r->layer.anchorPoint = CGPointZero;
++        [device release];
++        r->context = [[CAContext contextWithCGSConnection:CGSMainConnectionID() options:@{}] retain];
++        [r->context setLayer:r->layer];
++        r->contextId = [r->context contextId];
++        if (!r->contextId) { [r->context setLayer:nil]; [r->context release]; [r->layer release]; [r release]; return; }
++        remote = r;
++    });
++    if (!remote) return NULL;
++    *out_layer = (macdrv_metal_layer)remote->layer;
++    *out_context_id = remote->contextId;
++    return (macdrv_remote_layer)remote;
++}
++
++void macdrv_release_remote_layer(macdrv_remote_layer rl)
++{
++    WineRemoteLayer *r = (WineRemoteLayer *)rl;
++    OnMainThread(^{
++        [r->context setLayer:nil];
++        [r->context release];
++        [r->layer release];
++        [r release];
++    });
++}
++
++/* Owner side: show / remove the other process's layer in this window */
++void macdrv_sync_remote_layer(macdrv_window w, uint32_t context_id, CGRect frame)
++{
++    WineWindow *window = (WineWindow *)w;
++    OnMainThread(^{
++        WineContentView *view = (WineContentView *)[window contentView];
++        if ([view isKindOfClass:[WineContentView class]])
++            [view syncCALayerHostWithContextId:context_id frame:cgrect_mac_from_win(frame)];
++    });
++}
++
++void macdrv_remove_remote_layer(macdrv_window w, uint32_t context_id)
++{
++    WineWindow *window = (WineWindow *)w;
++    OnMainThread(^{
++        WineContentView *view = (WineContentView *)[window contentView];
++        if ([view isKindOfClass:[WineContentView class]]) [view removeCALayerHostView:context_id];
++    });
++}
++
+ void macdrv_view_release_metal_view(macdrv_metal_view v)
+ {
+     WineMetalView* view = (WineMetalView*)v;
+diff --git a/dlls/winemac.drv/gdi.c b/dlls/winemac.drv/gdi.c
+index 2ef941a..a19c153 100644
+--- a/dlls/winemac.drv/gdi.c
++++ b/dlls/winemac.drv/gdi.c
+@@ -231,11 +231,88 @@ static INT macdrv_GetDeviceCaps(PHYSDEV dev, INT cap)
+ }
+ 
+ 
++/* DXMT asks the driver for a Metal layer to draw into (escape codes used by Porting Kit's DXMT, same values) */
++#define MACDRV_ESCAPE_GET_SURFACE     0x1a86
++#define MACDRV_ESCAPE_RELEASE_SURFACE 0x1a87
++
++static INT macdrv_ExtEscape(PHYSDEV dev, INT escape, INT in_count, LPCVOID in, INT out_count, LPVOID out)
++{
++    switch (escape)
++    {
++    case QUERYESCSUPPORT:
++        if (in_count >= sizeof(INT))
++        {
++            INT code = *(const INT *)in;
++            if (code == MACDRV_ESCAPE_GET_SURFACE || code == MACDRV_ESCAPE_RELEASE_SURFACE) return 1;
++        }
++        return 0;
++
++    case MACDRV_ESCAPE_GET_SURFACE:
++    {
++        UINT64 *result = out;
++        struct macdrv_client_surface *surface;
++        HWND hwnd;
++
++        if (out_count < 2 * sizeof(UINT64) || !out) return 0;
++        if (!(hwnd = NtUserWindowFromDC(dev->hdc))) return 0;
++        if (!(surface = macdrv_client_surface_create(hwnd))) return 0;
++
++        /* window of another process (Steam's browser GPU process): publish an off-screen layer, let the owner host it */
++        {
++            HWND toplevel = NtUserGetAncestor(hwnd, GA_ROOT);
++            struct macdrv_win_data *data = get_win_data(toplevel);
++            if (data) release_win_data(data);
++            else
++            {
++                RECT rect;
++                macdrv_metal_layer layer;
++                uint32_t context_id;
++
++                NtUserGetClientRect(hwnd, &rect, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI));
++                if (!(surface->remote_layer = macdrv_create_remote_layer(cgrect_from_rect(rect), &layer, &context_id))) goto err;
++                surface->remote_toplevel = toplevel;
++                surface->remote_context_id = context_id;
++                NtUserPostMessage(toplevel, WM_MACDRV_SYNC_REMOTE_LAYER, (WPARAM)hwnd, context_id);
++                result[0] = (UINT_PTR)surface;
++                result[1] = (UINT_PTR)layer;
++                TRACE("hwnd %p remote surface %p layer %p context %u\n", hwnd, surface, layer, context_id);
++                return 1;
++            }
++        }
++
++        if (!(surface->metal_device = macdrv_create_metal_device())) goto err;
++        if (!(surface->metal_view = macdrv_view_create_metal_view(surface->cocoa_view, surface->metal_device))) goto err;
++
++        /* show the client view now: the game presents through Metal and never calls Wine's present */
++        client_surface_update(&surface->client);
++        client_surface_present(&surface->client);
++
++        result[0] = (UINT_PTR)surface;
++        result[1] = (UINT_PTR)macdrv_view_get_metal_layer(surface->metal_view);
++        TRACE("hwnd %p surface %p layer %p\n", hwnd, surface, (void *)(UINT_PTR)result[1]);
++        return 1;
++
++    err:
++        client_surface_release(&surface->client);
++        return 0;
++    }
++
++    case MACDRV_ESCAPE_RELEASE_SURFACE:
++        if (in_count < sizeof(UINT64) || !in) return 0;
++        client_surface_release(&((struct macdrv_client_surface *)(UINT_PTR)*(const UINT64 *)in)->client);
++        return 1;
++    }
++
++    return 0;
++}
++
++
+ static const struct user_driver_funcs macdrv_funcs =
+ {
+     .dc_funcs.pCreateCompatibleDC = macdrv_CreateCompatibleDC,
+     .dc_funcs.pCreateDC = macdrv_CreateDC,
+     .dc_funcs.pDeleteDC = macdrv_DeleteDC,
++    .dc_funcs.pExtEscape = macdrv_ExtEscape,
+     .dc_funcs.pGetDeviceCaps = macdrv_GetDeviceCaps,
+     .dc_funcs.pGetDeviceGammaRamp = macdrv_GetDeviceGammaRamp,
+     .dc_funcs.pSetDeviceGammaRamp = macdrv_SetDeviceGammaRamp,
+diff --git a/dlls/winemac.drv/macdrv.h b/dlls/winemac.drv/macdrv.h
+index ac2a785..371ec3b 100644
+--- a/dlls/winemac.drv/macdrv.h
++++ b/dlls/winemac.drv/macdrv.h
+@@ -97,6 +97,8 @@ static inline RECT rect_from_cgrect(CGRect cgrect)
+ {
+     WM_MACDRV_SET_WIN_REGION = WM_WINE_FIRST_DRIVER_MSG,
+     WM_MACDRV_ACTIVATE_ON_FOLLOWING_FOCUS,
++    WM_MACDRV_SYNC_REMOTE_LAYER,      /* wparam: child hwnd, lparam: CAContext id */
++    WM_MACDRV_RELEASE_REMOTE_LAYER,   /* wparam: child hwnd, lparam: CAContext id */
+ };
+ 
+ struct macdrv_thread_data
+@@ -197,6 +199,9 @@ extern BOOL macdrv_SystemParametersInfo(UINT action, UINT int_param, void *ptr_p
+     macdrv_view           cocoa_view;
+     macdrv_metal_device   metal_device;
+     macdrv_metal_view     metal_view;
++    macdrv_remote_layer   remote_layer;     /* DXMT drawing into a window of another process */
++    HWND                  remote_toplevel;
++    UINT                  remote_context_id;
+ };
+ 
+ static inline struct macdrv_client_surface *impl_from_client_surface(struct client_surface *client)
+diff --git a/dlls/winemac.drv/macdrv_cocoa.h b/dlls/winemac.drv/macdrv_cocoa.h
+index 6a6b697..08c8500 100644
+--- a/dlls/winemac.drv/macdrv_cocoa.h
++++ b/dlls/winemac.drv/macdrv_cocoa.h
+@@ -106,6 +106,7 @@
+ typedef struct macdrv_opaque_metal_device* macdrv_metal_device;
+ typedef struct macdrv_opaque_metal_view* macdrv_metal_view;
+ typedef struct macdrv_opaque_metal_layer* macdrv_metal_layer;
++typedef struct macdrv_opaque_remote_layer* macdrv_remote_layer;
+ typedef struct macdrv_opaque_status_item* macdrv_status_item;
+ struct macdrv_event;
+ struct macdrv_query;
+@@ -527,6 +528,10 @@ extern void macdrv_order_cocoa_window(macdrv_window w, macdrv_window prev,
+ extern macdrv_metal_view macdrv_view_create_metal_view(macdrv_view v, macdrv_metal_device d);
+ extern macdrv_metal_layer macdrv_view_get_metal_layer(macdrv_metal_view v);
+ extern void macdrv_view_release_metal_view(macdrv_metal_view v);
++extern macdrv_remote_layer macdrv_create_remote_layer(CGRect bounds, macdrv_metal_layer *layer, uint32_t *context_id);
++extern void macdrv_release_remote_layer(macdrv_remote_layer r);
++extern void macdrv_sync_remote_layer(macdrv_window w, uint32_t context_id, CGRect frame);
++extern void macdrv_remove_remote_layer(macdrv_window w, uint32_t context_id);
+ extern bool macdrv_get_view_backing_size(macdrv_view v, int backing_size[2]);
+ extern void macdrv_set_view_backing_size(macdrv_view v, const int backing_size[2]);
+ extern uint32_t macdrv_window_background_color(void);
+diff --git a/dlls/winemac.drv/window.c b/dlls/winemac.drv/window.c
+index 9420e17..75e3c00 100644
+--- a/dlls/winemac.drv/window.c
++++ b/dlls/winemac.drv/window.c
+@@ -1076,6 +1076,11 @@ static void macdrv_client_surface_destroy(struct client_surface *client)
+ 
+     TRACE("%s\n", debugstr_client_surface(client));
+ 
++    if (surface->remote_layer)
++    {
++        NtUserPostMessage(surface->remote_toplevel, WM_MACDRV_RELEASE_REMOTE_LAYER, (WPARAM)client->hwnd, surface->remote_context_id);
++        macdrv_release_remote_layer(surface->remote_layer);
++    }
+     if (surface->metal_view) macdrv_view_release_metal_view(surface->metal_view);
+     if (surface->metal_device) macdrv_release_metal_device(surface->metal_device);
+ }
+@@ -1526,6 +1531,30 @@ LRESULT macdrv_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+             release_win_data(data);
+         }
+         return 0;
++    case WM_MACDRV_SYNC_REMOTE_LAYER:
++    {
++        HWND child = (HWND)wp;
++        macdrv_window cocoa_window;
++        RECT rect;
++
++        NtUserGetClientRect(child, &rect, NtUserGetWinMonitorDpi(child, MDT_RAW_DPI));
++        NtUserMapWindowPoints(child, hwnd, (POINT *)&rect, 2, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI));
++        if (!(data = get_win_data(hwnd))) return 0;
++        OffsetRect(&rect, data->rects.client.left - data->rects.visible.left, data->rects.client.top - data->rects.visible.top);
++        cocoa_window = data->cocoa_window;
++        release_win_data(data);
++        if (cocoa_window) macdrv_sync_remote_layer(cocoa_window, (uint32_t)lp, cgrect_from_rect(rect));
++        return 0;
++    }
++    case WM_MACDRV_RELEASE_REMOTE_LAYER:
++    {
++        macdrv_window cocoa_window;
++        if (!(data = get_win_data(hwnd))) return 0;
++        cocoa_window = data->cocoa_window;
++        release_win_data(data);
++        if (cocoa_window) macdrv_remove_remote_layer(cocoa_window, (uint32_t)lp);
++        return 0;
++    }
+     case WM_MACDRV_ACTIVATE_ON_FOLLOWING_FOCUS:
+         activate_on_following_focus();
+         TRACE("WM_MACDRV_ACTIVATE_ON_FOLLOWING_FOCUS time %u\n", activate_on_focus_time);

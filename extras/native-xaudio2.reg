@@ -1,0 +1,29 @@
+REGEDIT4
+
+; Use Microsoft's own XAudio2 2.0-2.7, X3DAudio 1.0-1.7 and XAPOFX 1.1-1.5 for every program in this prefix,
+; falling back to Wine's builtin copies when a native DLL is missing.
+; Needs the native DLLs in windows\system32 (64-bit) and windows\syswow64 (32-bit): Steam's DirectX redist
+; (DXSETUP from the June 2010 DirectX runtime) or `winetricks xact` put them there.
+
+[HKEY_CURRENT_USER\Software\Wine\DllOverrides]
+"xaudio2_0"="native,builtin"
+"xaudio2_1"="native,builtin"
+"xaudio2_2"="native,builtin"
+"xaudio2_3"="native,builtin"
+"xaudio2_4"="native,builtin"
+"xaudio2_5"="native,builtin"
+"xaudio2_6"="native,builtin"
+"xaudio2_7"="native,builtin"
+"x3daudio1_0"="native,builtin"
+"x3daudio1_1"="native,builtin"
+"x3daudio1_2"="native,builtin"
+"x3daudio1_3"="native,builtin"
+"x3daudio1_4"="native,builtin"
+"x3daudio1_5"="native,builtin"
+"x3daudio1_6"="native,builtin"
+"x3daudio1_7"="native,builtin"
+"xapofx1_1"="native,builtin"
+"xapofx1_2"="native,builtin"
+"xapofx1_3"="native,builtin"
+"xapofx1_4"="native,builtin"
+"xapofx1_5"="native,builtin"

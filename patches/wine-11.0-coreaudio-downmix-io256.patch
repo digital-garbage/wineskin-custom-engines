@@ -1,0 +1,130 @@
+diff --git a/dlls/winecoreaudio.drv/coreaudio.c b/dlls/winecoreaudio.drv/coreaudio.c
+index da2ae2d..91a0527 100644
+--- a/dlls/winecoreaudio.drv/coreaudio.c
++++ b/dlls/winecoreaudio.drv/coreaudio.c
+@@ -388,6 +388,40 @@ static void silence_buffer(struct coreaudio_stream *stream, BYTE *buffer, UINT32
+         memset(buffer, 0, frames * stream->fmt->nBlockAlign);
+ }
+ 
++/* Games such as Skyrim open a 5.1 stream even on a stereo device. CoreAudio would play only the first two
++ * channels and lose the center (dialogue) and the surrounds, so mix them down to stereo here (ITU-R BS.775). */
++static BOOL ca_downmixing(const struct coreaudio_stream *stream)
++{
++    return stream->flow == eRender && stream->dev_desc.mChannelsPerFrame == 2 &&
++           stream->fmt->nChannels > 2 && stream->fmt->nChannels <= 32;
++}
++
++static void ca_downmix_frames(const struct coreaudio_stream *stream, float *dst, const float *src, UINT32 frames)
++{
++    /* gains by speaker position bit: FL FR FC LFE BL BR FLC FRC BC SL SR */
++    static const float gl[11] = {1, 0, .7071f, 0, .7071f, 0, .7071f, 0, .5f, .7071f, 0};
++    static const float gr[11] = {0, 1, .7071f, 0, 0, .7071f, 0, .7071f, .5f, 0, .7071f};
++    float cl[32] = {0}, cr[32] = {0};
++    UINT32 nch = stream->fmt->nChannels, ch = 0, bit, i, c;
++    DWORD mask = 0;
++
++    if(stream->fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE)
++        mask = ((WAVEFORMATEXTENSIBLE *)stream->fmt)->dwChannelMask;
++    if(__builtin_popcount(mask) != nch)
++        mask = nch == 4 ? 0x33 : nch == 6 ? 0x3f : nch == 8 ? 0x63f : 0x3;
++    for(bit = 0; bit < 32 && ch < nch; bit++){
++        if(!(mask & (1u << bit))) continue;
++        if(bit < 11){ cl[ch] = gl[bit]; cr[ch] = gr[bit]; }
++        ch++;
++    }
++    for(i = 0; i < frames; i++, src += nch){
++        float l = 0, r = 0;
++        for(c = 0; c < nch; c++){ l += src[c] * cl[c]; r += src[c] * cr[c]; }
++        dst[2 * i]     = l > 1.0f ? 1.0f : l < -1.0f ? -1.0f : l;
++        dst[2 * i + 1] = r > 1.0f ? 1.0f : r < -1.0f ? -1.0f : r;
++    }
++}
++
+ /* CA is pulling data from us */
+ static OSStatus ca_render_cb(void *user, AudioUnitRenderActionFlags *flags,
+         const AudioTimeStamp *ts, UInt32 bus, UInt32 nframes,
+@@ -405,7 +439,13 @@ static OSStatus ca_render_cb(void *user, AudioUnitRenderActionFlags *flags,
+ 
+         chunk_bytes = (stream->bufsize_frames - stream->lcl_offs_frames) * stream->fmt->nBlockAlign;
+ 
+-        if(to_copy_bytes > chunk_bytes){
++        if(ca_downmixing(stream)){
++            UINT32 chunk_frames = min(to_copy_frames, stream->bufsize_frames - stream->lcl_offs_frames);
++            float *out = data->mBuffers[0].mData;
++            ca_downmix_frames(stream, out, (float *)(stream->local_buffer + lcl_offs_bytes), chunk_frames);
++            if(to_copy_frames > chunk_frames)
++                ca_downmix_frames(stream, out + 2 * chunk_frames, (float *)stream->local_buffer, to_copy_frames - chunk_frames);
++        }else if(to_copy_bytes > chunk_bytes){
+             memcpy(data->mBuffers[0].mData, stream->local_buffer + lcl_offs_bytes, chunk_bytes);
+             memcpy(((BYTE *)data->mBuffers[0].mData) + chunk_bytes, stream->local_buffer, to_copy_bytes - chunk_bytes);
+         }else
+@@ -417,8 +457,12 @@ static OSStatus ca_render_cb(void *user, AudioUnitRenderActionFlags *flags,
+     }else
+         to_copy_bytes = to_copy_frames = 0;
+ 
+-    if(nframes > to_copy_frames)
+-        silence_buffer(stream, ((BYTE *)data->mBuffers[0].mData) + to_copy_bytes, nframes - to_copy_frames);
++    if(nframes > to_copy_frames){
++        if(ca_downmixing(stream))
++            memset(((float *)data->mBuffers[0].mData) + 2 * to_copy_frames, 0, (nframes - to_copy_frames) * 2 * sizeof(float));
++        else
++            silence_buffer(stream, ((BYTE *)data->mBuffers[0].mData) + to_copy_bytes, nframes - to_copy_frames);
++    }
+ 
+     os_unfair_lock_unlock(&stream->lock);
+ 
+@@ -664,10 +708,25 @@ static HRESULT ca_setup_audiounit(EDataFlow dataflow, AudioComponentInstance uni
+     }else{
+         AudioChannelLayout layout;
+ 
++        BOOL downmix = FALSE;
++
+         hr = ca_get_audiodesc(dev_desc, fmt);
+         if(FAILED(hr))
+             return hr;
+ 
++        /* More channels than a stereo device has: feed the unit stereo and mix down ourselves */
++        if(fmt->nChannels > 2 && fmt->nChannels <= 32 && (dev_desc->mFormatFlags & kAudioFormatFlagIsFloat) &&
++           dev_desc->mBitsPerChannel == 32){
++            AudioStreamBasicDescription hw;
++            UInt32 hw_size = sizeof(hw);
++            if(AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0,
++                                    &hw, &hw_size) == noErr && hw.mChannelsPerFrame == 2){
++                dev_desc->mChannelsPerFrame = 2;
++                dev_desc->mBytesPerFrame = dev_desc->mBytesPerPacket = 2 * sizeof(float);
++                downmix = TRUE;
++            }
++        }
++
+         dump_adesc("final", dev_desc);
+         sc = AudioUnitSetProperty(unit, kAudioUnitProperty_StreamFormat,
+                                   kAudioUnitScope_Input, 0, dev_desc, sizeof(*dev_desc));
+@@ -678,7 +737,7 @@ static HRESULT ca_setup_audiounit(EDataFlow dataflow, AudioComponentInstance uni
+ 
+         /* Set channel layout: AudioChannelBitmap and dwChannelMask conveniently have identical positions */
+         layout.mChannelLayoutTag = kAudioChannelLayoutTag_UseChannelBitmap;
+-        layout.mChannelBitmap    = (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE) ? ((WAVEFORMATEXTENSIBLE *)fmt)->dwChannelMask : 0x3;
++        layout.mChannelBitmap    = downmix ? 0x3 : (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE) ? ((WAVEFORMATEXTENSIBLE *)fmt)->dwChannelMask : 0x3;
+         layout.mNumberChannelDescriptions = 0;
+ 
+         sc = AudioUnitSetProperty(unit, kAudioUnitProperty_AudioChannelLayout,
+@@ -756,6 +815,19 @@ static NTSTATUS unix_create_stream(void *args)
+         goto end;
+     }
+ 
++    if(stream->flow == eRender){
++        /* CoreAudio's default IO size (512 frames) is bigger than the 10 ms (441-480 frames) a client
++         * refills per period event; clients that keep only ~2 periods queued (native XAudio2) then run
++         * dry once per beat and the output chops. Use a smaller IO size, like Windows' 10 ms engine pull. */
++        const char *e = getenv("WINECA_IOFRAMES");
++        UInt32 io_frames = e ? atoi(e) : 256;
++        if(io_frames){
++            OSStatus st = AudioUnitSetProperty(stream->unit, kAudioDevicePropertyBufferFrameSize,
++                    kAudioUnitScope_Global, 0, &io_frames, sizeof(io_frames));
++            if(st != noErr) WARN("Couldn't set IO buffer size %u: %x\n", (unsigned)io_frames, (int)st);
++        }
++    }
++
+     params->result = ca_setup_audiounit(stream->flow, stream->unit, stream->fmt, &stream->dev_desc, &stream->converter);
+     if(FAILED(params->result)) goto end;
+ 
