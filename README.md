@@ -2,7 +2,7 @@
 
 Wine engines for [Wineskin](https://github.com/Gcenx/WineskinServer) and [Porting Kit](https://www.portingkit.com/) wrappers on macOS, with fixes for running Steam and DirectX 11 games through [DXMT](https://github.com/3Shain/dxmt) (Direct3D 11 on Metal).
 
-Latest: **[WS12_Wine11.0_DXMT_DGsCustom-v0.3](../../releases/latest)**
+Latest: **[WS12_Wine11.0_DXMT_DGsCustom-v0.4](../../releases/latest)**
 
 It is a hobby build: everything was tested on one machine only (see [Test machine](#test-machine)). Other Macs, macOS versions and games are untested.
 
@@ -13,13 +13,14 @@ It is a hobby build: everything was tested on one machine only (see [Test machin
 | Mac | MacBook Pro 13" M1, 2020 (MacBookPro17,1) |
 | Chip / RAM | Apple M1 (8-core CPU, 8-core GPU), 8 GB |
 | macOS | 27.0 (26A5421a), Rosetta 2 |
-| Display | external 4K (3840x2160) |
+| Display | Samsung Odyssey G5, 2560x1440 at 120 Hz (macOS scaled mode "looks like 1920x1080", drawn at 3840x2160) |
 | Audio | wired headphones on the 3.5 mm jack, 48 kHz output |
 | Mouse | Logitech G PRO X Superlight 2 (up to 8 kHz polling) |
 | Wrapper | Wineskin wrapper made by Porting Kit (Steam, 32+64-bit), DXMT enabled |
-| Tested | Steam (login, library, store), The Elder Scrolls V: Skyrim Special Edition (about 60 FPS at 1080p low), Counter-Strike: Source |
+| Controller | Xbox Elite Wireless Controller Series 2 (firmware 5.22), USB and Bluetooth LE |
+| Tested | Steam (login, library, store), The Elder Scrolls V: Skyrim Special Edition (about 60 FPS at 1080p low), Counter-Strike: Source, PowerWash Simulator 2, Grind Survivors |
 
-## What is in v0.3
+## What is in v0.4
 
 The base is Porting Kit's Wine 11.0 engine with its DXMT build. On top of it:
 
@@ -29,8 +30,10 @@ The base is Porting Kit's Wine 11.0 engine with its DXMT build. On top of it:
 | 2 | 5.1 game audio is mixed down to stereo instead of losing the center and rear channels | `lib/wine/x86_64-unix/winecoreaudio.so` |
 | 3 | Microsoft's XAudio2 no longer "chops" (helicopter-like flutter) | `lib/wine/x86_64-unix/winecoreaudio.so` |
 | 4 | Mac driver rebuilt from plain Wine 11.0 source, with the DXMT surface hooks Steam needs | `lib/wine/x86_64-unix/winemac.so` |
+| 5 | Xbox controllers connected over Bluetooth are detected by Steam and games (v0.4) | `lib/wine/x86_64-unix/winebus.so` |
+| 6 | Mouse clicks work in newer Unity games, e.g. PowerWash Simulator 2 (v0.4) | `lib/wine/x86_64-windows/user32.dll`, `lib/wine/i386-windows/user32.dll` |
 
-Everything else is byte-identical to the Porting Kit engine. Source patches for 2-4 are in [`patches/`](patches).
+Everything else is byte-identical to the Porting Kit engine. Source patches for 2-6 are in [`patches/`](patches).
 
 ### 1. Skyrim "pure virtual function call" crash (DXMT)
 
@@ -71,6 +74,27 @@ This driver is plain Wine 11.0 `winemac.drv` plus:
 
 Why rebuild it at all: Porting Kit's driver is closed source. Having the source means mouse and window problems can now be debugged and fixed (see Known issues).
 
+### 5. Xbox controllers over Bluetooth (controller driver)
+
+**Symptom:** an Xbox Elite Series 2 works with a USB cable, but over Bluetooth Steam and games do not see it.
+
+**Cause:** Wine builds the same XInput-style gamepad in both cases (through SDL), and macOS Bluetooth hotplug works. The only difference is the product id Wine reports: the cable gives `045E:0B00`, Bluetooth LE gives `045E:0B22` (newer controller firmware). Steam ignores the Bluetooth ids, presumably because it would expect the native Bluetooth report format for them, which Wine's generic gamepad does not use.
+
+**Fix:** for mapped Xbox gamepads, Wine's SDL controller bus reports the wired id of the same model: Xbox One S `02E0`/`02FD`/`0B20` become `02EA`, Elite Series 2 `0B05`/`0B22` become `0B00`, Xbox Series `0B13` becomes `0B12`. Verified in Steam and in Grind Survivors over Bluetooth.
+
+### 6. Mouse clicks in newer Unity games (user32)
+
+**Symptom:** the cursor moves, but clicks do nothing (PowerWash Simulator 2 and other recent Unity games).
+
+**Cause:** newer Unity versions call `EnableMouseInPointer(TRUE)` and then read mouse buttons only from pointer messages (`WM_POINTERDOWN`, `WM_POINTERUP`, ...). In Wine 11.0 that function is a stub that fails, and Wine never turns mouse input into pointer messages, so clicks never arrive. Upstream Wine implemented it after 11.0 (commits [71b686ce](https://gitlab.winehq.org/wine/wine/-/commit/71b686ce9fdce65416080c834a9103a743dc095c) and [b94237cd](https://gitlab.winehq.org/wine/wine/-/commit/b94237cd34864bd8f920b44532f7827a73784563), see also [Wine bug 53847](https://bugs.winehq.org/show_bug.cgi?id=53847)).
+
+**Fix:** the same behaviour, built into `user32.dll` (upstream changes `win32u`, but Porting Kit's `win32u` contains extra CrossOver code whose source is not public, so it cannot be rebuilt):
+- `EnableMouseInPointer` succeeds and `IsMouseInPointerEnabled` reports the setting.
+- When a mouse message leaves the queue (`GetMessage`/`PeekMessage` with `PM_REMOVE`), the window also gets the matching `WM_POINTERDOWN`/`UP`/`UPDATE`/`WHEEL`, with upstream's button flag rules.
+- `GetPointerInfo` answers for the mouse (pointer id 1): type `PT_MOUSE`, cursor position, and the buttons held when the message was sent.
+
+Known difference from upstream: pointer messages are also sent for mouse messages that a program posts to itself.
+
 ### Recommended: Microsoft XAudio2 for all games
 
 Wine's builtin XAudio2 (based on FAudio) runs games that use XAudio2 2.7 or older, but in Skyrim it sounded muffled and its reverb made voices echo indoors (see also [Wine bug 53108](https://bugs.winehq.org/show_bug.cgi?id=53108)). Microsoft's own DLLs fix both, and with fix 3 they no longer chop. This is a setting of the wrapper's prefix, not of the engine:
@@ -82,7 +106,7 @@ It covers XAudio2 2.0-2.7, X3DAudio and XAPOFX only. Games using XAudio2 2.8/2.9
 
 ## Installing the engine
 
-Download `WS12_Wine11.0_DXMT_DGsCustom-v0.3.tar.7z` from [Releases](../../releases/latest). Do not unpack it; Wineskin reads the `.tar.7z` directly. Put it into:
+Download `WS12_Wine11.0_DXMT_DGsCustom-v0.4.tar.7z` from [Releases](../../releases/latest). Do not unpack it; Wineskin reads the `.tar.7z` directly. Put it into:
 
 ```
 ~/Library/Application Support/Wineskin/Engines/
@@ -95,7 +119,7 @@ The engine needs Apple Silicon with Rosetta 2, or an Intel Mac. Games must be Di
 ### Plain Wineskin
 
 - **New wrapper:** open **Wineskin Winery**. The engine appears in the engine list once the file is in the Engines folder. Select it and click **Create New Blank Wrapper**, then install your game as usual.
-- **Existing wrapper:** right-click the wrapper app, choose **Show Package Contents**, and open **Wineskin.app** inside. Click **Advanced**, open the **Tools** tab, click **Change Engine Used**, and pick `WS12_Wine11.0_DXMT_DGsCustom-v0.3`.
+- **Existing wrapper:** right-click the wrapper app, choose **Show Package Contents**, and open **Wineskin.app** inside. Click **Advanced**, open the **Tools** tab, click **Change Engine Used**, and pick `WS12_Wine11.0_DXMT_DGsCustom-v0.4`.
 
 ### Porting Kit
 
@@ -113,11 +137,11 @@ In mouse-look games (Counter-Strike: Source, PowerWash Simulator 2) turning the 
 
 - **High polling rates hurt.** A pure CPU benchmark (no Wine, no game) runs about 23% slower while an 8 kHz mouse moves. WindowServer and Apple's HID drivers eat the CPU. This part is macOS itself: 1000 Hz behaves better than 8000 Hz, and 125 Hz is the least bad.
 - **The camera "zigzag"** comes from how games re-centre the cursor every frame (CS:S does it 50-67 times per second). macOS 27 folds each warp jump into the next movement event, and Wine discards those events. Their sum cancels out, so no real movement is lost, but movement reaches the game unevenly: about half of the frames get no mouse delta during a steady sweep.
-- **Cursor clipping state** differed between a "bad" and a "good" run in one test setup. That setup used an instrumented driver, though. With the clean driver in v0.3 the game behaves the same from launch, and alt-tab changes nothing, so this lead is not confirmed.
+- **Cursor clipping state** differed between a "bad" and a "good" run in one test setup. That setup used an instrumented driver, though. With the clean driver (since v0.3) the game behaves the same from launch, and alt-tab changes nothing, so this lead is not confirmed.
 - **Ruled out by measurement:** Wine's main thread being blocked, window level, display capture, raw input (`m_rawinput 1`), and Wine's cursor-clip event tap.
 - **Next steps:** a warp-free relative mouse mode (skip the cursor warp while the game hides and confines the cursor, and feed the game raw movement deltas instead), then measure with the same trace tools.
 
-The Mac driver in v0.3 is built from source (fix 4) mainly so this can be fixed. Porting Kit's driver is closed.
+The Mac driver is built from source (fix 4) mainly so this can be fixed. Porting Kit's driver is closed.
 
 ### System cursor over the game (WIP, not included)
 
@@ -139,9 +163,15 @@ The patches apply to the Wine 11.0 release (`git checkout wine-11.0`):
 ```
 git apply patches/wine-11.0-winemac-surface-escape.patch
 git apply patches/wine-11.0-coreaudio-downmix-io256.patch
+git apply patches/wine-11.0-winebus-bt-xbox-pid.patch
+git apply patches/wine-11.0-user32-mouse-in-pointer.patch
 ```
 
-Build Wine as x86_64 (under Rosetta on Apple Silicon), then copy `winemac.so` and `winecoreaudio.so` from `dlls/winemac.drv/` and `dlls/winecoreaudio.drv/` into the engine's `wswine.bundle/lib/wine/x86_64-unix/`. The `winemac.so` built from this patch is byte-identical to the one in v0.3.
+Build Wine as x86_64 (under Rosetta on Apple Silicon, with the i386 PE cross compiler for 32-bit DLLs). Then copy into the engine's `wswine.bundle/lib/wine/`:
+- `winemac.so`, `winecoreaudio.so` and `winebus.so` into `x86_64-unix/`;
+- `user32.dll` into `x86_64-windows/` and `i386-windows/`.
+
+The `winemac.so` built from this patch is byte-identical to the one in the release.
 
 To repack an engine: put `wswine.bundle/` into `NAME.tar`, compress it with `7zz a -mx=5 NAME.tar.7z NAME.tar`, and set `wswine.bundle/version` to a matching name.
 

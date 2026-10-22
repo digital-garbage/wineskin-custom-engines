@@ -1,0 +1,26 @@
+diff --git a/dlls/winebus.sys/bus_sdl.c b/dlls/winebus.sys/bus_sdl.c
+index bc79040..6d1f7be 100644
+--- a/dlls/winebus.sys/bus_sdl.c
++++ b/dlls/winebus.sys/bus_sdl.c
+@@ -974,6 +974,21 @@ static void sdl_add_device(unsigned int index)
+         desc.version = 0;
+     }
+ 
++    /* Xbox controllers connected over Bluetooth get their wired product id. The device we create is the
++     * same XInput-style gamepad either way, and Steam ignores it under the Bluetooth ids (which it would
++     * drive through the native Bluetooth report format) but accepts the wired ones. */
++    if (controller && desc.vid == 0x045e)
++    {
++        WORD bt_pid = desc.pid;
++        switch (desc.pid)
++        {
++        case 0x02e0: case 0x02fd: case 0x0b20: desc.pid = 0x02ea; break; /* Xbox One S */
++        case 0x0b05: case 0x0b22: desc.pid = 0x0b00; break; /* Xbox Elite Series 2 */
++        case 0x0b13: desc.pid = 0x0b12; break; /* Xbox Series X|S */
++        }
++        if (desc.pid != bt_pid) TRACE("Bluetooth Xbox controller %04x reported as wired %04x\n", bt_pid, desc.pid);
++    }
++
+     if (pSDL_JoystickGetSerial && (sdl_serial = pSDL_JoystickGetSerial(joystick)))
+         ntdll_umbstowcs(sdl_serial, strlen(sdl_serial) + 1, desc.serialnumber, ARRAY_SIZE(desc.serialnumber));
+ 
