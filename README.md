@@ -2,7 +2,7 @@
 
 Wine engines for [Wineskin](https://github.com/Gcenx/WineskinServer) and [Porting Kit](https://www.portingkit.com/) wrappers on macOS, with fixes for running Steam and DirectX 11 games through [DXMT](https://github.com/3Shain/dxmt) (Direct3D 11 on Metal).
 
-Latest: **[WS12_Wine11.0_DXMT_DGsCustom-v0.4](../../releases/latest)**
+Latest: **[WS12Wine11.0_DXMT_DGsCustom-v0.4](../../releases/latest)**
 
 It is a hobby build: everything was tested on one machine only (see [Test machine](#test-machine)). Other Macs, macOS versions and games are untested.
 
@@ -106,7 +106,7 @@ It covers XAudio2 2.0-2.7, X3DAudio and XAPOFX only. Games using XAudio2 2.8/2.9
 
 ## Installing the engine
 
-Download `WS12_Wine11.0_DXMT_DGsCustom-v0.4.tar.7z` from [Releases](../../releases/latest). Do not unpack it; Wineskin reads the `.tar.7z` directly. Put it into:
+Download `WS12Wine11.0_DXMT_DGsCustom-v0.4.tar.7z` from [Releases](../../releases/latest). Do not unpack it; Wineskin reads the `.tar.7z` directly. Put it into:
 
 ```
 ~/Library/Application Support/Wineskin/Engines/
@@ -119,15 +119,17 @@ The engine needs Apple Silicon with Rosetta 2, or an Intel Mac. Games must be Di
 ### Plain Wineskin
 
 - **New wrapper:** open **Wineskin Winery**. The engine appears in the engine list once the file is in the Engines folder. Select it and click **Create New Blank Wrapper**, then install your game as usual.
-- **Existing wrapper:** right-click the wrapper app, choose **Show Package Contents**, and open **Wineskin.app** inside. Click **Advanced**, open the **Tools** tab, click **Change Engine Used**, and pick `WS12_Wine11.0_DXMT_DGsCustom-v0.4`.
+- **Existing wrapper:** right-click the wrapper app, choose **Show Package Contents**, and open **Wineskin.app** inside. Click **Advanced**, open the **Tools** tab, click **Change Engine Used**, and pick `WS12Wine11.0_DXMT_DGsCustom-v0.4`.
 
 ### Porting Kit
 
 Porting Kit ports are Wineskin wrappers and use the same Engines folder.
 
 1. Put the engine file into `~/Library/Application Support/Wineskin/Engines/`.
-2. Switch the port to it. If the port app contains `Wineskin.app` (Show Package Contents), use **Change Engine Used** as in the Wineskin steps above. Otherwise, change the engine from the port's settings in Porting Kit.
-3. Keep a copy of the port before switching. If something breaks, switch back to the engine it had before.
+2. **New port:** pick `WS12Wine11.0_DXMT_DGsCustom-v0.4` in the engine list when creating the port.
+3. **Existing port:** switch it. If the port app contains `Wineskin.app` (Show Package Contents), use **Change Engine Used** as in the Wineskin steps above. Otherwise, change the engine from the port's settings in Porting Kit.
+4. Keep a copy of the port before switching. If something breaks, switch back to the engine it had before.
+5. Do not rename the engine file. Porting Kit rebuilds the name from its parts (`WS12` + `Wine` + `11.0` + the rest) and looks for a file with exactly that name. Any extra character, such as `WS12_Wine…`, makes it miss the local file and try to download the engine from its own server, which fails.
 
 ## Known issues and work in progress
 
